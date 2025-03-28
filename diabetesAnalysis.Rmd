@@ -1,0 +1,258 @@
+---
+title: "diabetesReadmissionanalysis"
+author: "Kanishk Kapoor"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+library("dplyr")
+library("tidyr")
+library("caret")
+library("rpart")
+library("rpart.plot")
+library("ggplot2")
+library("car")
+library("ROSE")
+library("randomForest")
+library("pROC")
+library("corrplot")
+library("ggfortify")
+library("reshape2")
+library("car")
+library("cluster")
+library("factoextra")
+```
+
+```{r}
+d_data <- read.csv("diabetes_hospital_readmission.csv", stringsAsFactors = FALSE)
+```
+
+```{r}
+str(d_data)
+```
+```{r}
+View(d_data)
+```
+```{r}
+d_data <- d_data %>% select(-c(payer_code,weight))
+```
+```{r}
+d_data$race <- as.factor(d_data$race)
+d_data$gender <- as.factor(d_data$gender)
+d_data$medical_specialty <- as.factor(d_data$medical_specialty)
+d_data$max_glu_serum <- as.factor(d_data$max_glu_serum)
+d_data$A1Cresult <- as.factor(d_data$A1Cresult)
+d_data$change <- as.factor(d_data$change)
+d_data$age <- as.factor(d_data$age)
+```
+
+
+```{r}
+d_data$readmitted_binary <- ifelse(d_data$readmitted == "NO", "No", "Yes")
+d_data$readmitted_binary <- factor(d_data$readmitted_binary, levels= c("No","Yes"))
+d_data$readmitted <- as.factor(d_data$readmitted)
+```
+
+```{r}
+str(d_data)
+```
+```{r}
+colSums(is.na(d_data))
+```
+
+### EDA
+
+```{r}
+ggplot(d_data, aes(x=age)) +
+  geom_bar(bins=20,fill = "maroon", alpha=0.7) +
+  theme_minimal() +
+  ggtitle("Age Distribution")
+```
+Most patients aged are in 50-90 bracket with the most in 70-80.
+
+```{r}
+ggplot(d_data, aes(y=time_in_hospital)) +
+  geom_boxplot(fill ="maroon", alpha=0.7) +
+  theme_minimal() +
+  ggtitle("Time in hospital distribution")
+```
+
+```{r}
+d_data %>% group_by(race) %>%
+  summarise(Count = n()) %>%
+  arrange(desc(Count))
+```
+
+```{r}
+d_data %>% group_by(gender) %>%
+  summarise(Count=n()) %>%
+  arrange(desc(Count))
+```
+
+```{r}
+ggplot(d_data,aes(x=readmitted_binary,y=time_in_hospital,fill= factor(readmitted_binary)))+
+  geom_boxplot()+
+  ggtitle("Time in Hopsital vs Readmission")+
+  theme_minimal()
+```
+
+```{r}
+d_data$readmitted_binary_num <- as.numeric(d_data$readmitted_binary) -1
+```
+```{r}
+numeric_df <- d_data[, sapply(d_data, is.numeric)]
+```
+```{r}
+str(numeric_df)
+```
+
+```{r}
+corr_matrix <- cor(numeric_df, use = "complete.obs")
+```
+```{r}
+melted_cor <- melt(corr_matrix)
+
+# Plot heatmap
+ggplot(data = melted_cor, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1, 1), space = "Lab", 
+                       name = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
+#### T- Testing individual features
+
+```{r}
+#Number of Procedures vs readmission
+t.test(d_data$num_procedures ~ d_data$readmitted_binary_num, data= d_data)
+```
+✅ This may suggest that patients with fewer procedures might have been discharged prematurely, leading to readmission.
+```{r}
+#2 Number of Medications vs Readmission
+t.test(d_data$num_medications ~ d_data$readmitted_binary_num, data=d_data)
+```
+Interpretation: Readmitted patients took more medications on average.
+
+✅ More medications could indicate complex health conditions requiring frequent readmission.
+
+
+
+```{r}
+#3 Number of Diagnoses vs Readmission
+t.test(d_data$number_diagnoses ~ d_data$readmitted_binary_num, data = d_data)
+
+```
+Interpretation: Readmitted patients had more diagnoses on average, suggesting they had more complicated health conditions.
+
+✅ Higher number of diagnoses increases readmission risk.
+```{r}
+#4 Number of Lab Procedures vs Readmission
+t.test(d_data$num_lab_procedures ~ d_data$readmitted_binary_num, data= d_data)
+```
+	•	Interpretation: Readmitted patients had more lab procedures.
+
+✅ More lab tests could indicate severe conditions or frequent monitoring needs, increasing the likelihood of readmission.
+
+
+```{r}
+#5 Time of stay in hospital vs Readmission 
+t.test(d_data$time_in_hospital ~ d_data$readmitted_binary_num, data=d_data)
+```
+	•	Interpretation: Readmitted patients had slightly longer hospital stays.
+
+✅ Longer stays might indicate more severe conditions or complications that increase readmission risk.
+
+#### VIF to check multicollinearity 
+	•	If predictors are highly correlated, the model may become unstable and coefficients may be misleading.
+	•	VIF > 5 or 10 suggests high multicollinearity, meaning the variable should be removed or combined.
+	
+```{r}
+ logit_model <- glm(readmitted_binary_num ~ num_procedures + num_medications + number_diagnoses + race + age + gender + time_in_hospital, data = d_data, family = binomial())
+```
+	
+```{r}
+vif(logit_model)
+```
+VIF < 5 → Low multicollinearity (Good)
+```{r}
+summary(logit_model)
+```
+```{r}
+library(pROC)
+roc_curve <- roc(d_data$readmitted_binary_num, predict(logit_model, type = "response"))
+plot(roc_curve, col = "blue", main = "ROC Curve for Readmission Prediction")
+auc(roc_curve)  # Get AUC value
+```
+#### PEARSON'S CHI SQUARE TEST ( For categorial vs binary outcome)
+```{r}
+# Chi-Square Test for each categorical feature
+chisq.test(table(d_data$race, d_data$readmitted_binary_num))
+chisq.test(table(d_data$gender, d_data$readmitted_binary_num))
+chisq.test(table(d_data$age, d_data$readmitted_binary_num))
+```
+
+Cost Analysis & Resource Allocation 💰
+
+Objective: Identify which factors contribute to higher hospital costs and optimize resource allocation.
+
+✅ How to approach it:
+	•	Use Total Lab Procedures, Number of Diagnoses, Medications, Length of Stay to estimate hospital cost per patient.
+	•	Group by patient demographics (age, race, gender) to find which groups incur higher costs.
+	•	Use clustering (K-Means, Hierarchical) to identify patient groups with similar cost patterns.
+
+📌 Industry Relevance: Hospitals need cost-effective resource management—your insights can help optimize staff scheduling, bed occupancy, and treatment planning.
+
+Since our dataset doesn’t include direct cost values, we need a proxy for hospital costs.
+Common cost-related variables:
+	•	time_in_hospital → Longer stays = higher costs
+	•	num_medications → More meds = higher costs
+	•	num_lab_procedures → More tests = higher costs
+	•	num_procedures → More surgeries = higher costs
+	•	number_diagnoses → Complex cases may require more resources
+
+```{r}
+d_data$cost_proxy <- d_data$time_in_hospital * 500 + #estimated daily cost
+                     d_data$num_medications * 50 + # medication cost
+                     d_data$num_lab_procedures * 30 + # lab test cost
+                     d_data$num_procedures * 200 # procedure cost
+#This assumes estimated costs, but in real-world hospital datasets, we’d use actual billing records.
+
+```
+
+```{r}
+summary(d_data$cost_proxy)
+```
+```{r}
+hist(d_data$cost_proxy, breaks = 50, main =" Hospital Cost Distribution" , col ="skyblue")
+```
+```{r}
+boxplot(cost_proxy ~ age, data = d_data, main="Cost by Age Group", col="lightgreen")
+```
+older patients incur higher costs due to chronic illnesses.
+
+```{r}
+boxplot(cost_proxy ~ race, data = d_data, main="Cost Distubution by Ethinicity", col="maroon")
+```
+
+```{r}
+boxplot(cost_proxy ~ gender, data= d_data, main="Cost Distribution by Gender", col="purple")
+```
+```{r}
+boxplot(cost_proxy ~ readmitted_binary_num, data = d_data, main = "Cost by Readmission", col = "red")
+```
+Readmitted patients have a little higher cost.
+
+Both ANOVA and Kruskal-Wallis are used to compare three or more groups to determine if their means or distributions are significantly different. They are commonly used in medical and cost analysis when checking if patient characteristics (e.g., age groups) impact costs, readmission rates, or other numerical outcomes
+
+```{r}
+anova_test <- aov(cost_proxy ~ age, data = d_data)
+summary(anova_test)
+```
+
